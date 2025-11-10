@@ -14,6 +14,48 @@ class DatabaseManager:
         self.connection_string = self._get_connection_string()
         self.connection = None
 
+    def get_request_by_number(self, user_id: int, request_number: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает заявку по номеру для конкретного пользователя
+
+        Args:
+            user_id: ID пользователя
+            request_number: Номер заявки
+
+        Returns:
+            Данные заявки или None если не найдена
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT 
+                    id, request_number, request_text, status, 
+                    photo_url, video_url, latitude, longitude,
+                    created_at, updated_at
+                FROM requests 
+                WHERE user_id = ? AND request_number = ?
+            """, user_id, request_number)
+
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'id': row[0],
+                    'request_number': row[1],
+                    'request_text': row[2],
+                    'status': row[3],
+                    'photo_url': row[4],
+                    'video_url': row[5],
+                    'latitude': row[6],
+                    'longitude': row[7],
+                    'created_at': row[8],
+                    'updated_at': row[9]
+                }
+            return None
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении заявки по номеру: {e}")
+            return None
+
     def _get_connection_string(self) -> str:
         """Формирует правильную строку подключения к SQL Server"""
         server = os.getenv('DB_SERVER', 'localhost')
@@ -285,3 +327,49 @@ class DatabaseManager:
         except pyodbc.Error as e:
             print(f"Ошибка при получении пользователя: {e}")
             return None
+
+    def get_user_requests(self, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Получает список заявок пользователя
+
+        Args:
+            user_id: ID пользователя
+            limit: Максимальное количество заявок для возврата
+
+        Returns:
+            Список заявок пользователя
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT 
+                    id, request_number, request_text, status, 
+                    photo_url, video_url, latitude, longitude,
+                    created_at, updated_at
+                FROM requests 
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY
+            """, user_id, limit)
+
+            requests = []
+            for row in cursor.fetchall():
+                request_data = {
+                    'id': row[0],
+                    'request_number': row[1],
+                    'request_text': row[2],
+                    'status': row[3],
+                    'photo_url': row[4],
+                    'video_url': row[5],
+                    'latitude': row[6],
+                    'longitude': row[7],
+                    'created_at': row[8],
+                    'updated_at': row[9]
+                }
+                requests.append(request_data)
+
+            return requests
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении заявок пользователя: {e}")
+            return []
