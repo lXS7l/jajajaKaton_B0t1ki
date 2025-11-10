@@ -8,10 +8,12 @@ from telegram import Update, ReplyKeyboardRemove, ReplyKeyboardMarkup, KeyboardB
     InlineKeyboardMarkup
 from dotenv import load_dotenv
 from DatabaseManager import DatabaseManager
+from datetime import datetime
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
-WAITING_FOR_TEXT, WAITING_FOR_LOCATION, SELECTING_REQUEST = range(3)
+(WAITING_FOR_TEXT, WAITING_FOR_LOCATION, SELECTING_REQUEST, WAITING_FOR_ADMIN_CODE,
+ WAITING_FOR_BROADCAST, WAITING_FOR_REPORT_PERIOD) = range(6)
 
 # Получаем токен бота из переменной окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -353,47 +355,40 @@ def _get_status_text(status: str) -> str:
     }
     return status_texts.get(status, status)
 
-async def handle_other_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик любых текстовых сообщений кроме команд"""
-    await update.message.reply_text(
-        "Введите команду:\n"
-        "/start, /submit_request, /my_requests"
-    )
+async def download_media(bot, file_id: str, file_type: str = 'photo', save_path: str = None) -> str:
+    """
+    Скачивает медиафайл и сохраняет его локально
 
-    async def download_media(bot, file_id: str, file_type: str = 'photo', save_path: str = None) -> str:
-        """
-        Скачивает медиафайл и сохраняет его локально
+    Args:
+        bot: Экземпляр бота
+        file_id: ID файла из базы данных
+        file_type: Тип файла ('photo', 'video', 'document')
+        save_path: Путь для сохранения (если None, сохраняет в временную папку)
 
-        Args:
-            bot: Экземпляр бота
-            file_id: ID файла из базы данных
-            file_type: Тип файла ('photo', 'video', 'document')
-            save_path: Путь для сохранения (если None, сохраняет в временную папку)
+    Returns:
+        Путь к сохраненному файлу
+    """
+    try:
+        # Получаем информацию о файле
+        file = await bot.get_file(file_id)
 
-        Returns:
-            Путь к сохраненному файлу
-        """
-        try:
-            # Получаем информацию о файле
-            file = await bot.get_file(file_id)
+        # Определяем путь для сохранения
+        if save_path is None:
+            import tempfile
+            import os
+            # Создаем временную папку если нужно
+            temp_dir = tempfile.gettempdir()
+            file_extension = file.file_path.split('.')[-1] if file.file_path else 'jpg'
+            save_path = os.path.join(temp_dir, f"telegram_{file_id}.{file_extension}")
 
-            # Определяем путь для сохранения
-            if save_path is None:
-                import tempfile
-                import os
-                # Создаем временную папку если нужно
-                temp_dir = tempfile.gettempdir()
-                file_extension = file.file_path.split('.')[-1] if file.file_path else 'jpg'
-                save_path = os.path.join(temp_dir, f"telegram_{file_id}.{file_extension}")
+        # Скачиваем файл
+        await file.download_to_drive(custom_path=save_path)
+        print(f"Файл сохранен: {save_path}")
+        return save_path
 
-            # Скачиваем файл
-            await file.download_to_drive(custom_path=save_path)
-            print(f"Файл сохранен: {save_path}")
-            return save_path
-
-        except Exception as e:
-            print(f"Ошибка при скачивании файла: {e}")
-            return None
+    except Exception as e:
+        print(f"Ошибка при скачивании файла: {e}")
+        return None
 
 async def request_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Показывает клавиатуру с заявками для выбора"""
@@ -522,7 +517,7 @@ async def show_selected_request(update: Update, context: ContextTypes.DEFAULT_TY
             lat = request_data['latitude']
             lon = request_data['longitude']
             detail_text += f"<b>Координаты:</b> {lat:.6f}, {lon:.6f}\n"
-            detail_text += f"<a href='https://www.google.com/maps?q={lat},{lon}'>Открыть на карте</a>\n"
+            detail_text += f"<a href='https://yandex.ru/maps/?ll={lon},{lat}&z=19'>Открыть на карте</a>\n"
 
         # Создаем инлайн-клавиатуру с кнопкой отмены (только для заявок со статусом new или in_progress)
         reply_markup = None
@@ -554,10 +549,10 @@ async def show_selected_request(update: Update, context: ContextTypes.DEFAULT_TY
             )
 
         # Отправляем навигационные кнопки отдельным сообщением
-        # await update.message.reply_text(
-        #     "Выберите действие:",
-        #     reply_markup=nav_reply_markup
-        # )
+        await update.message.reply_text(
+            "Выберите действие:",
+            reply_markup=nav_reply_markup
+        )
 
         # Если есть фото, отправляем его
         if request_data['photo_url']:
@@ -711,6 +706,469 @@ async def cancel_request_callback(query, context, request_id):
         print(f"Ошибка при отмене заявки через callback: {e}")
         await query.answer("Произошла ошибка при отмене заявки.", show_alert=True)
 
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик команды /admin - запрашивает код администратора"""
+    try:
+        user = update.effective_user
+
+        # Проверяем, не является ли пользователь уже администратором
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+        if db_user and db_user['is_admin']:
+            await show_admin_menu(update, context)
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            "<b>Вход в админ-панель</b>\n\n"
+            "Введите секретный код администратора:",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+        return WAITING_FOR_ADMIN_CODE
+
+    except Exception as e:
+        print(f"Ошибка в команде /admin: {e}")
+        await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
+        return ConversationHandler.END
+
+async def verify_admin_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Проверяет введенный код администратора"""
+    try:
+        user = update.effective_user
+        code = update.message.text
+
+        # Получаем пользователя из БД
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+        if not db_user:
+            await update.message.reply_text("Пользователь не найден в базе данных.")
+            return ConversationHandler.END
+
+        # ПЕРЕДАЕМ TELEGRAM_ID, а не внутренний ID!
+        success = db_instance.verify_admin_code(code, user.id)
+
+        if success:
+            await update.message.reply_text(
+                "<b>Код принят! Теперь вы администратор.</b>",
+                parse_mode='HTML'
+            )
+            await show_admin_menu(update, context)
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text(
+                "<b>Неверный код</b>\n\n"
+                "Попробуйте еще раз или введите /cancel для отмены:",
+                parse_mode='HTML'
+            )
+            return WAITING_FOR_ADMIN_CODE
+
+    except Exception as e:
+        print(f"Ошибка при проверке кода администратора: {e}")
+        await update.message.reply_text("Произошла ошибка. Попробуйте снова.")
+        return ConversationHandler.END
+
+async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает меню администратора"""
+    keyboard = [
+        ["Статистика", "Все заявки"],
+        ["Все пользователи", "Выгрузка отчета"],
+        ["Рассылка", "Главное меню"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    await update.message.reply_text(
+        "<b>Админ-панель</b>\n\n"
+        "Выберите действие:",
+        parse_mode='HTML',
+        reply_markup=reply_markup
+    )
+
+async def admin_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает статистику для администратора"""
+    try:
+        # Проверяем права администратора
+        user = update.effective_user
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+
+        if not db_user or not db_user['is_admin']:
+            await update.message.reply_text("У вас нет прав администратора.")
+            return
+
+        # Получаем статистику
+        all_requests = db_instance.get_all_requests()
+        all_users = db_instance.get_all_users()
+
+        # Считаем заявки по статусам
+        status_count = {
+            'new': 0,
+            'in_progress': 0,
+            'completed': 0,
+            'rejected': 0,
+            'cancelled': 0
+        }
+
+        for request in all_requests:
+            status_count[request['status']] = status_count.get(request['status'], 0) + 1
+
+        # Формируем сообщение
+        stats_text = (
+            "<b>Статистика системы</b>\n\n"
+            f"<b>Всего пользователей:</b> {len(all_users)}\n"
+            f"<b>Всего заявок:</b> {len(all_requests)}\n\n"
+            f"<b>По статусам:</b>\n"
+            f"• Новые: {status_count['new']}\n"
+            f"• В обработке: {status_count['in_progress']}\n"
+            f"• Завершены: {status_count['completed']}\n"
+            f"• Отклонены: {status_count['rejected']}\n"
+            f"• Отменены: {status_count['cancelled']}\n\n"
+            f"<b>Администраторов:</b> {sum(1 for user in all_users if user['is_admin'])}"
+        )
+
+        await update.message.reply_text(stats_text, parse_mode='HTML')
+
+    except Exception as e:
+        print(f"Ошибка при показе статистики: {e}")
+        await update.message.reply_text("Ошибка при получении статистики.")
+
+async def admin_all_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает все заявки для администратора"""
+    try:
+        # Проверяем права администратора
+        user = update.effective_user
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+
+        if not db_user or not db_user['is_admin']:
+            await update.message.reply_text("У вас нет прав администратора.")
+            return
+
+        # Получаем заявки
+        requests = db_instance.get_all_requests(limit=20)  # Ограничиваем для удобства
+
+        if not requests:
+            await update.message.reply_text("Заявок пока нет.")
+            return
+
+        # Формируем сообщение
+        requests_text = "<b>Последние заявки</b>\n\n"
+
+        for i, req in enumerate(requests[:10], 1):  # Показываем первые 10
+            user_info = req['user_full_name'] or req['user_username'] or 'Аноним'
+            created_date = format_datetime(req['created_at'])
+
+            requests_text += (
+                f"{i}. <code>{req['request_number']}</code>\n"
+                f"   {user_info}\n"
+                f"   {created_date}\n"
+                f"   {_get_status_text(req['status'])}\n"
+                f"   {req['request_text'][:50]}...\n\n"
+            )
+
+        if len(requests) > 10:
+            requests_text += f"\n... и еще {len(requests) - 10} заявок"
+
+        await update.message.reply_text(requests_text, parse_mode='HTML')
+
+    except Exception as e:
+        print(f"Ошибка при показе всех заявок: {e}")
+        await update.message.reply_text("Ошибка при получении заявок.")
+
+async def admin_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает всех пользователей для администратора"""
+    try:
+        # Проверяем права администратора
+        user = update.effective_user
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+
+        if not db_user or not db_user['is_admin']:
+            await update.message.reply_text("У вас нет прав администратора.")
+            return
+
+        # Получаем пользователей
+        users = db_instance.get_all_users()
+
+        if not users:
+            await update.message.reply_text("Пользователей пока нет.")
+            return
+
+        # Формируем сообщение
+        users_text = "👥 <b>Все пользователи</b>\n\n"
+
+        for i, user_data in enumerate(users[:10], 1):  # Показываем первые 10
+            user_name = user_data['full_name'] or user_data['username'] or 'Аноним'
+            created_date = format_datetime(user_data['created_at'])
+            admin_status = "Админ" if user_data['is_admin'] else "Пользователь"
+
+            users_text += (
+                f"{i}. {user_name}\n"
+                f"   {admin_status}\n"
+                f"   {created_date}\n"
+                f"   ID: {user_data['telegram_id']}\n\n"
+            )
+
+        if len(users) > 10:
+            users_text += f"\n... и еще {len(users) - 10} пользователей"
+
+        await update.message.reply_text(users_text, parse_mode='HTML')
+
+    except Exception as e:
+        print(f"Ошибка при показе пользователей: {e}")
+        await update.message.reply_text("Ошибка при получении пользователей.")
+
+async def export_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает процесс выгрузки отчета"""
+    try:
+        # Проверяем права администратора
+        user = update.effective_user
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+
+        if not db_user or not db_user['is_admin']:
+            await update.message.reply_text("У вас нет прав администратора.")
+            return ConversationHandler.END
+
+        keyboard = [
+            ["За сегодня", "За неделю"],
+            ["За месяц", "За все время"],
+            ["Отмена"]
+        ]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+        await update.message.reply_text(
+            "<b>Выгрузка отчета</b>\n\n"
+            "Выберите период для выгрузки:",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+
+        return WAITING_FOR_REPORT_PERIOD
+
+    except Exception as e:
+        print(f"Ошибка в команде выгрузки отчета: {e}")
+        await update.message.reply_text("Ошибка при выгрузке отчета.")
+        return ConversationHandler.END
+
+async def generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Генерирует и отправляет отчет"""
+    try:
+        period_text = update.message.text
+        days = None
+
+        if period_text == "За сегодня":
+            days = 1
+        elif period_text == "За неделю":
+            days = 7
+        elif period_text == "За месяц":
+            days = 30
+        elif period_text == "За все время":
+            days = None
+        else:
+            await update.message.reply_text("Неверный период. Попробуйте снова.")
+            return WAITING_FOR_REPORT_PERIOD
+
+        # Получаем данные для отчета
+        requests = db_instance.get_all_requests(days=days)
+
+        # Создаем CSV отчет
+        import csv
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8',
+                                         suffix='.csv', delete=False) as f:
+            writer = csv.writer(f)
+            writer.writerow(['Номер заявки', 'Статус', 'Текст заявки', 'Пользователь',
+                             'Телефон', 'Дата создания', 'Координаты'])
+
+            for req in requests:
+                user_name = req['user_full_name'] or req['user_username'] or 'Аноним'
+                coords = f"{req['latitude']}, {req['longitude']}" if req['latitude'] else "Нет"
+                created_date = format_datetime(req['created_at'])
+
+                writer.writerow([
+                    req['request_number'],
+                    _get_status_text(req['status']),
+                    req['request_text'],
+                    user_name,
+                    req['user_phone_number'] or 'Не указан',
+                    created_date,
+                    coords
+                ])
+
+            temp_path = f.name
+
+        # Отправляем файл
+        with open(temp_path, 'rb') as file:
+            await update.message.reply_document(
+                document=file,
+                filename=f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                caption=f"Отчет за {period_text.lower()}\n"
+                        f"Всего заявок: {len(requests)}"
+            )
+
+        # Удаляем временный файл
+        os.unlink(temp_path)
+
+        await update.message.reply_text(
+            "Отчет успешно выгружен!",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+        return ConversationHandler.END
+
+    except Exception as e:
+        print(f"Ошибка при генерации отчета: {e}")
+        await update.message.reply_text("Ошибка при генерации отчета.")
+        return ConversationHandler.END
+
+async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает процесс массовой рассылки"""
+    try:
+        # Проверяем права администратора
+        user = update.effective_user
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+
+        if not db_user or not db_user['is_admin']:
+            await update.message.reply_text("У вас нет прав администратора.")
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            "<b>Массовая рассылка</b>\n\n"
+            "Введите сообщение для рассылки всем пользователям:",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardMarkup([["Отмена"]], resize_keyboard=True)
+        )
+
+        return WAITING_FOR_BROADCAST
+
+    except Exception as e:
+        print(f"Ошибка в команде рассылки: {e}")
+        await update.message.reply_text("Ошибка при запуске рассылки.")
+        return ConversationHandler.END
+
+async def confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждает и отправляет рассылку"""
+    try:
+        message_text = update.message.text
+
+        # Сохраняем текст рассылки для подтверждения
+        context.user_data['broadcast_text'] = message_text
+
+        keyboard = [["Отправить", "Отмена"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+        await update.message.reply_text(
+            "<b>Предпросмотр рассылки</b>\n\n"
+            f"{message_text}\n\n"
+            "Отправить это сообщение всем пользователям?",
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+
+        return WAITING_FOR_BROADCAST
+
+    except Exception as e:
+        print(f"Ошибка при подтверждении рассылки: {e}")
+        await update.message.reply_text("Ошибка при подготовке рассылки.")
+        return ConversationHandler.END
+
+async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Выполняет рассылку сообщения"""
+    try:
+        choice = update.message.text
+
+        if choice == "Отмена":
+            await update.message.reply_text(
+                "Рассылка отменена.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return ConversationHandler.END
+
+        # Получаем всех пользователей
+        users = db_instance.get_all_users()
+        message_text = context.user_data.get('broadcast_text', '')
+
+        if not message_text:
+            await update.message.reply_text("Текст рассылки не найден.")
+            return ConversationHandler.END
+
+        # Отправляем сообщение всем пользователям
+        success_count = 0
+        fail_count = 0
+
+        await update.message.reply_text(f"🔄 Начинаем рассылку для {len(users)} пользователей...")
+
+        for user in users:
+            try:
+                await context.bot.send_message(
+                    chat_id=user['telegram_id'],
+                    text=f"<b>Важное сообщение</b>\n\n{message_text}",
+                    parse_mode='HTML'
+                )
+                success_count += 1
+                # Небольшая задержка чтобы не превысить лимиты Telegram
+                await asyncio.sleep(0.1)
+
+            except Exception as e:
+                print(f"Не удалось отправить сообщение пользователю {user['telegram_id']}: {e}")
+                fail_count += 1
+
+        # Очищаем временные данные
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"<b>Рассылка завершена!</b>\n\n"
+            f"• Успешно отправлено: {success_count}\n"
+            f"• Не удалось отправить: {fail_count}",
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+        return ConversationHandler.END
+
+    except Exception as e:
+        print(f"Ошибка при отправке рассылки: {e}")
+        await update.message.reply_text("Ошибка при отправке рассылки.")
+        return ConversationHandler.END
+
+async def cancel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отменяет административные действия"""
+    context.user_data.clear()
+    await update.message.reply_text(
+        "Действие отменено.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
+async def handle_admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает действия из админ-меню"""
+    try:
+        user = update.effective_user
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+
+        if not db_user or not db_user['is_admin']:
+            await update.message.reply_text("У вас нет прав администратора.")
+            return
+
+        text = update.message.text
+        if text == "Статистика":
+            await admin_statistics(update, context)
+        elif text == "Все заявки":
+            await admin_all_requests(update, context)
+        elif text == "Все пользователи":
+            await admin_all_users(update, context)
+        elif text == "Выгрузка отчета":
+            await export_report(update, context)
+        elif text == "Рассылка":
+            await broadcast_message(update, context)
+        elif text == "Главное меню":
+            await update.message.reply_text(
+                "Возвращаемся в главное меню.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        else:
+            await update.message.reply_text("Неизвестная команда.")
+
+    except Exception as e:
+        print(f"Ошибка в обработчике админ-действий: {e}")
+        await update.message.reply_text("Произошла ошибка.")
 
 def main() -> None:
     """Основная функция запуска бота"""
@@ -732,7 +1190,18 @@ def main() -> None:
         # Сохраняем экземпляр БД в bot_data для доступа из обработчиков
         application.bot_data['db'] = db_instance
 
-        # Создаем ConversationHandler для подачи заявки
+        # ConversationHandler для админ-аутентификации - ДОЛЖЕН БЫТЬ ПЕРВЫМ!
+        admin_auth_conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('admin', admin_command)],
+            states={
+                WAITING_FOR_ADMIN_CODE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, verify_admin_code)
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_admin)],
+        )
+
+        # ConversationHandler для подачи заявки
         request_conv_handler = ConversationHandler(
             entry_points=[CommandHandler('submit_request', submit_request)],
             states={
@@ -748,7 +1217,7 @@ def main() -> None:
             fallbacks=[CommandHandler('cancel', cancel_submit)],
         )
 
-        # Создаем ConversationHandler для просмотра заявок
+        # ConversationHandler для просмотра заявок
         view_requests_conv_handler = ConversationHandler(
             entry_points=[CommandHandler('request_details', request_details)],
             states={
@@ -767,16 +1236,51 @@ def main() -> None:
             fallbacks=[CommandHandler('cancel', cancel_request_selection)],
         )
 
-        # Добавляем обработчики команд
-        application.add_handler(CommandHandler("start", start))
+        # ConversationHandler для выгрузки отчета
+        report_conv_handler = ConversationHandler(
+            entry_points=[MessageHandler(filters.Regex('^Выгрузка отчета$'), export_report)],
+            states={
+                WAITING_FOR_REPORT_PERIOD: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, generate_report)
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_admin)],
+        )
+
+        # ConversationHandler для рассылки
+        broadcast_conv_handler = ConversationHandler(
+            entry_points=[MessageHandler(filters.Regex('^Рассылка$'), broadcast_message)],
+            states={
+                WAITING_FOR_BROADCAST: [
+                    MessageHandler(filters.Regex('^(Отправить|Отмена)$'), send_broadcast),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_broadcast)
+                ],
+            },
+            fallbacks=[CommandHandler('cancel', cancel_admin)],
+        )
+
+        # 1. ConversationHandler
+        application.add_handler(admin_auth_conv_handler)
         application.add_handler(request_conv_handler)
         application.add_handler(view_requests_conv_handler)
+        application.add_handler(report_conv_handler)
+        application.add_handler(broadcast_conv_handler)
+
+        # 2. CommandHandler
+        application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("my_requests", my_requests))
 
-        # Добавляем обработчик инлайн-кнопок
+        # 3. Обработчик инлайн-кнопок
         application.add_handler(CallbackQueryHandler(handle_inline_button))
 
-        # Обработчик для любых других сообщений
+        # 4. Обработчик для админ-меню (должен быть до общего обработчика)
+        application.add_handler(MessageHandler(
+            filters.Regex(
+                '^(Статистика|Все заявки|Все пользователи|Выгрузка отчета|Рассылка|Главное меню)$'),
+            handle_admin_actions
+        ))
+
+        # 5. Обработчик для любых других сообщений - ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_other_messages))
 
         # Запускаем бота
@@ -788,6 +1292,13 @@ def main() -> None:
     finally:
         if db_instance:
             db_instance.disconnect()
+
+async def handle_other_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик любых текстовых сообщений кроме команд"""
+    await update.message.reply_text(
+        "Введите команду:\n"
+        "/start, /submit_request, /my_requests"
+    )
 
 async def get_media_url(bot, file_id: str, file_type: str = 'photo') -> str:
     """

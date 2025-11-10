@@ -14,6 +14,66 @@ class DatabaseManager:
         self.connection_string = self._get_connection_string()
         self.connection = None
 
+    def get_all_requests(self, status_filter: str = None, days: int = None, limit: int = None) -> List[Dict[str, Any]]:
+        """
+        Получает все заявки (для администратора)
+        """
+        try:
+            cursor = self.connection.cursor()
+
+            query = """
+                SELECT 
+                    r.id, r.request_number, r.request_text, r.status, 
+                    r.photo_url, r.video_url, r.latitude, r.longitude,
+                    r.created_at, r.updated_at,
+                    u.full_name, u.username, u.phone_number
+                FROM requests r
+                LEFT JOIN users u ON r.user_id = u.id
+                WHERE 1=1
+            """
+            params = []
+
+            if status_filter:
+                query += " AND r.status = ?"
+                params.append(status_filter)
+
+            if days:
+                query += " AND r.created_at >= DATEADD(day, -?, GETDATE())"
+                params.append(days)
+
+            query += " ORDER BY r.created_at DESC"
+
+            if limit:
+                query += " OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY"
+                params.append(limit)
+
+            cursor.execute(query, params)
+
+            requests = []
+            for row in cursor.fetchall():
+                request_data = {
+                    'id': row[0],
+                    'request_number': row[1],
+                    'request_text': row[2],
+                    'status': row[3],
+                    'photo_url': row[4],
+                    'video_url': row[5],
+                    'latitude': row[6],
+                    'longitude': row[7],
+                    'created_at': row[8],
+                    'updated_at': row[9],
+                    'user_full_name': row[10],
+                    'user_username': row[11],
+                    'user_phone_number': row[12]
+                }
+                requests.append(request_data)
+
+            return requests
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении всех заявок: {e}")
+            return []
+
     def get_request_by_number(self, user_id: int, request_number: str) -> Optional[Dict[str, Any]]:
         """
         Получает заявку по номеру для конкретного пользователя
@@ -170,11 +230,12 @@ class DatabaseManager:
                     WHERE id = ?
                 """, code_id)
 
-                # Выдаем права администратора
+                # ВАЖНО: Выдаем права администратора пользователю
+                # Используем telegram_id для поиска пользователя
                 cursor.execute("""
                     UPDATE users 
                     SET is_admin = 1 
-                    WHERE id = ?
+                    WHERE telegram_id = ?
                 """, user_id)
 
                 self.connection.commit()
@@ -327,6 +388,122 @@ class DatabaseManager:
         except pyodbc.Error as e:
             print(f"Ошибка при получении пользователя: {e}")
             return None
+
+    # def get_all_requests(self, status_filter: str = None, days: int = None) -> List[Dict[str, Any]]:
+    #     """
+    #     Получает все заявки (для администратора)
+    #
+    #     Args:
+    #         status_filter: Фильтр по статусу
+    #         days: За последние N дней
+    #
+    #     Returns:
+    #         Список всех заявок
+    #     """
+    #     try:
+    #         cursor = self.connection.cursor()
+    #
+    #         query = """
+    #             SELECT
+    #                 r.id, r.request_number, r.request_text, r.status,
+    #                 r.photo_url, r.video_url, r.latitude, r.longitude,
+    #                 r.created_at, r.updated_at,
+    #                 u.full_name, u.username, u.phone_number
+    #             FROM requests r
+    #             LEFT JOIN users u ON r.user_id = u.id
+    #             WHERE 1=1
+    #         """
+    #         params = []
+    #
+    #         if status_filter:
+    #             query += " AND r.status = ?"
+    #             params.append(status_filter)
+    #
+    #         if days:
+    #             query += " AND r.created_at >= DATEADD(day, -?, GETDATE())"
+    #             params.append(days)
+    #
+    #         query += " ORDER BY r.created_at DESC"
+    #
+    #         cursor.execute(query, params)
+    #
+    #         requests = []
+    #         for row in cursor.fetchall():
+    #             request_data = {
+    #                 'id': row[0],
+    #                 'request_number': row[1],
+    #                 'request_text': row[2],
+    #                 'status': row[3],
+    #                 'photo_url': row[4],
+    #                 'video_url': row[5],
+    #                 'latitude': row[6],
+    #                 'longitude': row[7],
+    #                 'created_at': row[8],
+    #                 'updated_at': row[9],
+    #                 'user_full_name': row[10],
+    #                 'user_username': row[11],
+    #                 'user_phone_number': row[12]
+    #             }
+    #             requests.append(request_data)
+    #
+    #         return requests
+    #
+    #     except pyodbc.Error as e:
+    #         print(f"Ошибка при получении всех заявок: {e}")
+    #         return []
+
+    def update_request_status(self, request_id: int, status: str, admin_comment: str = None) -> bool:
+        """
+        Обновляет статус заявки (для администратора)
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE requests 
+                SET status = ?, updated_at = GETDATE(), admin_comment = ?
+                WHERE id = ?
+            """, status, admin_comment, request_id)
+
+            self.connection.commit()
+            print(f"Статус заявки {request_id} обновлен на '{status}'")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при обновлении статуса заявки: {e}")
+            self.connection.rollback()
+            return False
+
+    def get_all_users(self) -> List[Dict[str, Any]]:
+        """
+        Получает всех пользователей (для администратора)
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT id, telegram_id, username, full_name, phone_number, 
+                       is_admin, created_at
+                FROM users 
+                ORDER BY created_at DESC
+            """)
+
+            users = []
+            for row in cursor.fetchall():
+                user_data = {
+                    'id': row[0],
+                    'telegram_id': row[1],
+                    'username': row[2],
+                    'full_name': row[3],
+                    'phone_number': row[4],
+                    'is_admin': bool(row[5]),
+                    'created_at': row[6]
+                }
+                users.append(user_data)
+
+            return users
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении пользователей: {e}")
+            return []
 
     def cancel_request(self, request_id: int, user_id: int) -> bool:
         """Отменяет заявку (меняет статус на 'cancelled')"""
