@@ -328,6 +328,38 @@ class DatabaseManager:
             print(f"Ошибка при получении пользователя: {e}")
             return None
 
+    def cancel_request(self, request_id: int, user_id: int) -> bool:
+        """Отменяет заявку (меняет статус на 'cancelled')"""
+        try:
+            cursor = self.connection.cursor()
+
+            # Проверяем, что заявка принадлежит пользователю и имеет допустимый статус для отмены
+            cursor.execute("""
+                SELECT status FROM requests 
+                WHERE id = ? AND user_id = ? AND status IN ('new', 'in_progress')
+            """, request_id, user_id)
+
+            result = cursor.fetchone()
+            if not result:
+                print(f"Заявка {request_id} не найдена или нельзя отменить")
+                return False
+
+            # Обновляем статус заявки
+            cursor.execute("""
+                UPDATE requests 
+                SET status = 'cancelled', updated_at = GETDATE()
+                WHERE id = ?
+            """, request_id)
+
+            self.connection.commit()
+            print(f"Заявка {request_id} отменена пользователем {user_id}")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при отмене заявки: {e}")
+            self.connection.rollback()
+            return False
+
     def get_user_requests(self, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Получает список заявок пользователя

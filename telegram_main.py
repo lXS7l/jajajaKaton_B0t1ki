@@ -1,9 +1,11 @@
 import asyncio
 import pyodbc
 from typing import Optional, Dict, Any
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, \
+    CallbackQueryHandler
 import os
-from telegram import Update, ReplyKeyboardRemove, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, ReplyKeyboardRemove, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, \
+    InlineKeyboardMarkup
 from dotenv import load_dotenv
 from DatabaseManager import DatabaseManager
 
@@ -346,7 +348,8 @@ def _get_status_text(status: str) -> str:
         'new': 'Новая',
         'in_progress': 'В обработке',
         'completed': 'Завершена',
-        'rejected': 'Отклонена'
+        'rejected': 'Отклонена',
+        'cancelled': 'Отменена'
     }
     return status_texts.get(status, status)
 
@@ -457,7 +460,7 @@ async def request_details(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
 async def show_selected_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Показывает детали выбранной заявки"""
+    """Показывает детали выбранной заявки с кнопкой отмены"""
     try:
         user = update.effective_user
         message_text = update.message.text
@@ -473,8 +476,9 @@ async def show_selected_request(update: Update, context: ContextTypes.DEFAULT_TY
         # Получаем сохраненные заявки
         user_requests = context.user_data.get('user_requests', [])
 
-        # Извлекаем номер заявки из текста кнопки (первые 13 символов - это формат ГГГГММДД-СССС)
+        # Извлекаем номер заявки из текста кнопки
         request_number = None
+        request_data = None
         for request in user_requests:
             if request['request_number'] in message_text:
                 request_number = request['request_number']
@@ -491,6 +495,9 @@ async def show_selected_request(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return SELECTING_REQUEST
 
+        # Сохраняем данные заявки в context для использования в callback
+        context.user_data['current_request'] = request_data
+
         # Форматируем даты
         created_date = format_datetime(request_data['created_at'])
         updated_date = format_datetime(request_data['updated_at'])
@@ -506,29 +513,51 @@ async def show_selected_request(update: Update, context: ContextTypes.DEFAULT_TY
 
         # Добавляем информацию о медиа
         if request_data['photo_url']:
-            detail_text += "<b>Прикреплено фото</b>\n"
+            detail_text += "📷 <b>Прикреплено фото</b>\n"
         if request_data['video_url']:
-            detail_text += "<b>Прикреплено видео</b>\n"
+            detail_text += "🎥 <b>Прикреплено видео</b>\n"
 
         # Добавляем информацию о геолокации
         if request_data['latitude'] and request_data['longitude']:
             lat = request_data['latitude']
             lon = request_data['longitude']
             detail_text += f"<b>Координаты:</b> {lat:.6f}, {lon:.6f}\n"
-            detail_text += f"<a href='https://yandex.ru/maps/?ll={lon},{lat}&z=19'>Открыть на карте</a>\n"
+            detail_text += f"<a href='https://www.google.com/maps?q={lat},{lon}'>Открыть на карте</a>\n"
 
-        # Кнопки для навигации
-        keyboard = [
+        # Создаем инлайн-клавиатуру с кнопкой отмены (только для заявок со статусом new или in_progress)
+        reply_markup = None
+        if request_data['status'] in ['new', 'in_progress']:
+            keyboard = [
+                [InlineKeyboardButton("Отменить заявку", callback_data=f"cancel_{request_data['id']}")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            detail_text += "\n\nВы можете отменить эту заявку, если она еще не обработана:"
+
+        # Кнопки для навигации (обычная клавиатура)
+        nav_keyboard = [
             ["Посмотреть другую заявку"],
             ["Главное меню"]
         ]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        nav_reply_markup = ReplyKeyboardMarkup(nav_keyboard, resize_keyboard=True)
 
-        await update.message.reply_text(
-            detail_text,
-            parse_mode='HTML',
-            reply_markup=reply_markup
-        )
+        # Отправляем сообщение с деталями и инлайн-кнопкой (если есть)
+        if reply_markup:
+            await update.message.reply_text(
+                detail_text,
+                parse_mode='HTML',
+                reply_markup=reply_markup
+            )
+        else:
+            await update.message.reply_text(
+                detail_text,
+                parse_mode='HTML'
+            )
+
+        # Отправляем навигационные кнопки отдельным сообщением
+        # await update.message.reply_text(
+        #     "Выберите действие:",
+        #     reply_markup=nav_reply_markup
+        # )
 
         # Если есть фото, отправляем его
         if request_data['photo_url']:
@@ -627,6 +656,62 @@ def get_request_by_number(self, user_id: int, request_number: str) -> Optional[D
         print(f"Ошибка при получении заявки по номеру: {e}")
         return None
 
+async def handle_inline_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатия на инлайн-кнопки"""
+    query = update.callback_query
+    await query.answer()
+
+    # Извлекаем данные из callback_data
+    callback_data = query.data
+
+    if callback_data.startswith("cancel_"):
+        request_id = int(callback_data.split("_")[1])
+        await cancel_request_callback(query, context, request_id)
+
+async def cancel_request_callback(query, context, request_id):
+    """Обрабатывает отмену заявки через инлайн-кнопку"""
+    try:
+        global db_instance
+        user = query.from_user
+
+        # Получаем пользователя из БД
+        db_user = db_instance.get_user_by_telegram_id(user.id)
+        if not db_user:
+            await query.edit_message_text("Ошибка: пользователь не найден.")
+            return
+
+        # Пытаемся отменить заявку
+        success = db_instance.cancel_request(request_id, db_user['id'])
+
+        if success:
+            # Обновляем сообщение - убираем кнопку и меняем статус
+            message_text = query.message.text
+            # Заменяем статус в тексте сообщения
+            new_message_text = message_text.replace(
+                "<b>Статус:</b> Новая",
+                "<b>Статус:</b> Отменена"
+            ).replace(
+                "<b>Статус:</b> В обработке",
+                "<b>Статус:</b> Отменена"
+            )
+
+            # Убираем предложение отменить заявку
+            new_message_text = new_message_text.split("\n\nВы можете отменить эту заявку")[0]
+
+            await query.edit_message_text(
+                new_message_text + "\n\n<b>Заявка успешно отменена!</b>",
+                parse_mode='HTML'
+            )
+
+            print(f"Пользователь {user.id} отменил заявку {request_id}")
+        else:
+            await query.answer("Не удалось отменить заявку. Возможно, она уже обработана.", show_alert=True)
+
+    except Exception as e:
+        print(f"Ошибка при отмене заявки через callback: {e}")
+        await query.answer("Произошла ошибка при отмене заявки.", show_alert=True)
+
+
 def main() -> None:
     """Основная функция запуска бота"""
     global db_instance
@@ -687,6 +772,9 @@ def main() -> None:
         application.add_handler(request_conv_handler)
         application.add_handler(view_requests_conv_handler)
         application.add_handler(CommandHandler("my_requests", my_requests))
+
+        # Добавляем обработчик инлайн-кнопок
+        application.add_handler(CallbackQueryHandler(handle_inline_button))
 
         # Обработчик для любых других сообщений
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_other_messages))
