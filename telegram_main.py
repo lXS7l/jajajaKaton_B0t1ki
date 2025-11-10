@@ -1,7 +1,9 @@
+import asyncio
 import os
-from telegram import Update
+from telegram import Update, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from dotenv import load_dotenv
+from DatabaseManager import DatabaseManager
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
@@ -13,13 +15,41 @@ if not BOT_TOKEN:
 
 # Обработчики команд
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start"""
-    await update.message.reply_text(
-        "Привет! Я бот-помощник. Вот доступные команды:\n"
-        "/start - показать приветствие\n"
-        "/submit_request - подать заявку\n"
-        "/my_requests - посмотреть мои заявки"
-    )
+    """Обработчик команды /start - создает пользователя и показывает приветствие"""
+    try:
+        # Получаем информацию о пользователе
+        user = update.effective_user
+        message = update.message
+
+        # Создаем/получаем пользователя в базе данных
+        user_id = await asyncio.to_thread(
+            context.bot_data['db'].create_user,
+            telegram_id=user.id,
+            username=user.username,
+            full_name=user.full_name
+        )
+
+        # Приветственное сообщение
+        welcome_text = (
+            f"Привет,\n"
+            "Я бот-помощник 112 - система оперативного реагирования для жителей города.\n\n"
+            "<b>Доступные команды:</b>\n"
+            "/submit_request - Подать новое обращение\n"
+            "/my_requests - Посмотреть мои обращения\n"
+            "Чтобы начать, используйте команду /submit_request"
+        )
+
+        await message.reply_text(
+            welcome_text,
+            parse_mode='HTML',
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+    except Exception as e:
+        print(f"Ошибка в команде /start: {e}")
+        await update.message.reply_text(
+            "Произошла ошибка при запуске. Пожалуйста, попробуйте еще раз."
+        )
 
 
 async def submit_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -51,15 +81,29 @@ def main() -> None:
     # Создаем приложение и передаем ему токен
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Добавляем обработчики команд
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("submit_request", submit_request))
-    application.add_handler(CommandHandler("my_requests", my_requests))
+    # Создаем экземпляр базы данных
+    db = DatabaseManager()
+    db.connect()
 
-    # Добавляем обработчик для любых текстовых сообщений
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_other_messages))
-    # Запускаем бота
-    application.run_polling()
+    try:
+        # Создаем приложение бота
+        application = Application.builder().token(BOT_TOKEN).build()
+
+        # Сохраняем экземпляр БД в bot_data для доступа из обработчиков
+        application.bot_data['db'] = db
+
+        # Добавляем обработчики команд
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("submit_request", submit_request))
+        application.add_handler(CommandHandler("my_requests", my_requests))
+
+        # Запускаем бота
+        print("Бот запущен...")
+        application.run_polling()
+    except Exception as e:
+        print(f"Ошибка при запуске бота: {e}")
+    finally:
+        db.disconnect()
 
 
 if __name__ == "__main__":
