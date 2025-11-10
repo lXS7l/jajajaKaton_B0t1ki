@@ -326,8 +326,7 @@ async def my_requests(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         message_text += (
             f"Всего заявок: <b>{len(user_requests)}</b>\n\n"
             "Для просмотра деталей конкретной заявки используйте:\n"
-            "<code>/request_details номер_заявки</code>\n"
-            "Пример: <code>/request_details 20231215-0001</code>"
+            "/request_details\n"
         )
 
         await update.message.reply_text(message_text, parse_mode='HTML')
@@ -420,12 +419,12 @@ async def request_details(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Создаем клавиатуру с кнопками заявок
         keyboard = []
-        for request in user_requests:
+        for n, request in enumerate(user_requests):
             # Форматируем текст кнопки: номер + статус + дата
             created_date = format_datetime(request['created_at'])
             short_date = created_date.split()[0]  # Берем только дату
 
-            button_text = f"{request['request_number']} - {_get_status_text(request['status'])} - {short_date}"
+            button_text = f"{n+1}. {request['request_number']}" #- {_get_status_text(request['status'])} - {short_date}
             # Обрезаем если слишком длинный
             if len(button_text) > 30:
                 button_text = button_text[:27] + "..."
