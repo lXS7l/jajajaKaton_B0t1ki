@@ -389,70 +389,7 @@ class DatabaseManager:
             print(f"Ошибка при получении пользователя: {e}")
             return None
 
-    # def get_all_requests(self, status_filter: str = None, days: int = None) -> List[Dict[str, Any]]:
-    #     """
-    #     Получает все заявки (для администратора)
-    #
-    #     Args:
-    #         status_filter: Фильтр по статусу
-    #         days: За последние N дней
-    #
-    #     Returns:
-    #         Список всех заявок
-    #     """
-    #     try:
-    #         cursor = self.connection.cursor()
-    #
-    #         query = """
-    #             SELECT
-    #                 r.id, r.request_number, r.request_text, r.status,
-    #                 r.photo_url, r.video_url, r.latitude, r.longitude,
-    #                 r.created_at, r.updated_at,
-    #                 u.full_name, u.username, u.phone_number
-    #             FROM requests r
-    #             LEFT JOIN users u ON r.user_id = u.id
-    #             WHERE 1=1
-    #         """
-    #         params = []
-    #
-    #         if status_filter:
-    #             query += " AND r.status = ?"
-    #             params.append(status_filter)
-    #
-    #         if days:
-    #             query += " AND r.created_at >= DATEADD(day, -?, GETDATE())"
-    #             params.append(days)
-    #
-    #         query += " ORDER BY r.created_at DESC"
-    #
-    #         cursor.execute(query, params)
-    #
-    #         requests = []
-    #         for row in cursor.fetchall():
-    #             request_data = {
-    #                 'id': row[0],
-    #                 'request_number': row[1],
-    #                 'request_text': row[2],
-    #                 'status': row[3],
-    #                 'photo_url': row[4],
-    #                 'video_url': row[5],
-    #                 'latitude': row[6],
-    #                 'longitude': row[7],
-    #                 'created_at': row[8],
-    #                 'updated_at': row[9],
-    #                 'user_full_name': row[10],
-    #                 'user_username': row[11],
-    #                 'user_phone_number': row[12]
-    #             }
-    #             requests.append(request_data)
-    #
-    #         return requests
-    #
-    #     except pyodbc.Error as e:
-    #         print(f"Ошибка при получении всех заявок: {e}")
-    #         return []
-
-    def update_request_status(self, request_id: int, status: str, admin_comment: str = None) -> bool:
+    def update_request_status(self, request_id: int, status: str) -> bool:
         """
         Обновляет статус заявки (для администратора)
         """
@@ -460,9 +397,9 @@ class DatabaseManager:
             cursor = self.connection.cursor()
             cursor.execute("""
                 UPDATE requests 
-                SET status = ?, updated_at = GETDATE(), admin_comment = ?
+                SET status = ?, updated_at = GETDATE()
                 WHERE id = ?
-            """, status, admin_comment, request_id)
+            """, status, request_id)
 
             self.connection.commit()
             print(f"Статус заявки {request_id} обновлен на '{status}'")
@@ -470,6 +407,77 @@ class DatabaseManager:
 
         except pyodbc.Error as e:
             print(f"Ошибка при обновлении статуса заявки: {e}")
+            self.connection.rollback()
+            return False
+
+    def add_request_comment(self, request_id: int, admin_id: int, comment_text: str, is_public: bool = True) -> bool:
+        """
+        Добавляет комментарий к заявке в таблицу request_comments
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO request_comments (request_id, admin_id, comment_text, is_public)
+                VALUES (?, ?, ?, ?)
+            """, request_id, admin_id, comment_text, is_public)
+
+            self.connection.commit()
+            print(f"Комментарий к заявке {request_id} добавлен")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при добавлении комментария: {e}")
+            self.connection.rollback()
+            return False
+
+    def get_request_comments(self, request_id: int) -> List[Dict[str, Any]]:
+        """
+        Получает все комментарии для заявки
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT rc.comment_text, rc.is_public, rc.created_at, u.full_name
+                FROM request_comments rc
+                LEFT JOIN users u ON rc.admin_id = u.id
+                WHERE rc.request_id = ?
+                ORDER BY rc.created_at
+            """, request_id)
+
+            comments = []
+            for row in cursor.fetchall():
+                comment_data = {
+                    'comment_text': row[0],
+                    'is_public': row[1],
+                    'created_at': row[2],
+                    'admin_name': row[3]
+                }
+                comments.append(comment_data)
+
+            return comments
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении комментариев: {e}")
+            return []
+
+    def update_request_comment(self, request_id: int, admin_comment: str) -> bool:
+        """
+        Обновляет комментарий администратора к заявке
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE requests 
+                SET admin_comment = ?, updated_at = GETDATE()
+                WHERE id = ?
+            """, admin_comment, request_id)
+
+            self.connection.commit()
+            print(f"Комментарий к заявке {request_id} обновлен")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при обновлении комментария: {e}")
             self.connection.rollback()
             return False
 
