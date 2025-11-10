@@ -212,10 +212,10 @@ class DatabaseManager:
 
             cursor = self.connection.cursor()
             cursor.execute("""
-                INSERT INTO requests (user_id, request_text, photo_url, video_url, latitude, longitude, request_number)
-                OUTPUT INSERTED.id, INSERTED.request_number, INSERTED.created_at
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, user_id, request_text, photo_url, video_url, latitude, longitude, request_number)
+                    INSERT INTO requests (user_id, request_text, photo_url, video_url, latitude, longitude, request_number, status)
+                    OUTPUT INSERTED.id, INSERTED.request_number, INSERTED.created_at
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'new')
+                """, user_id, request_text, photo_url, video_url, latitude, longitude, request_number)
 
             request_id, request_number, created_at = cursor.fetchone()
             self.connection.commit()
@@ -225,7 +225,8 @@ class DatabaseManager:
             return {
                 'id': request_id,
                 'request_number': request_number,
-                'created_at': created_at
+                'created_at': created_at,
+                'status': 'new'
             }
 
         except pyodbc.Error as e:
