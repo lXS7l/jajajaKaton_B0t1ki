@@ -1,4 +1,12 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace Adminpanel
@@ -7,12 +15,32 @@ namespace Adminpanel
     {
         public bool IsAuthenticated { get; private set; } = false;
 
+        private void AutoForm_Paint(object sender, PaintEventArgs e) // Цвет
+        {
+            Graphics g = e.Graphics;
+            Rectangle rect = new Rectangle(0, 0, this.Width, this.Height);
+
+            Color startColor = ColorTranslator.FromHtml("#03624C"); // тёмно-зел
+            Color endColor = ColorTranslator.FromHtml("#93DF70");   // лайм
+
+            using (LinearGradientBrush brush = new LinearGradientBrush(rect, startColor, endColor, 45f))
+            {
+                g.FillRectangle(brush, rect);
+            }
+        }
+
         public AuthForm()
         {
             InitializeComponent();
+            this.Shown += AuthForm_Shown;
         }
 
-        private void btnLogin_Click(object sender, EventArgs e)
+        private void AuthForm_Shown(object sender, EventArgs e)
+        {
+            txtAdminCode.Focus();
+        }
+
+        private async void btnLogin_Click(object sender, EventArgs e)
         {
             string code = txtAdminCode.Text.Trim();
 
@@ -26,32 +54,40 @@ namespace Adminpanel
 
             // Показываем индикатор загрузки
             btnLogin.Enabled = false;
+            btnCancel.Enabled = false;
             btnLogin.Text = "Проверка...";
+            UseWaitCursor = true;
 
             try
             {
-                // Проверяем код
-                if (DatabaseHelper.VerifyAdminCode(code))
+                // Проверяем код асинхронно
+                bool isValid = await Task.Run(() => DatabaseHelper.VerifyAdminCode(code));
+
+                if (isValid)
                 {
                     IsAuthenticated = true;
                     MessageBox.Show("Авторизация успешна!", "Успех",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    this.DialogResult = DialogResult.OK;
+                    RequestsListForm form = new RequestsListForm();
+                    this.Hide();
+                    form.ShowDialog();
                     this.Close();
                 }
                 else
                 {
                     MessageBox.Show("Неверный код администратора или срок действия истек",
                         "Ошибка авторизации", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    txtAdminCode.Clear();
+                    txtAdminCode.SelectAll();
                     txtAdminCode.Focus();
                 }
             }
             finally
             {
-                // Восстанавливаем кнопку
+                // Восстанавливаем элементы управления
                 btnLogin.Enabled = true;
+                btnCancel.Enabled = true;
                 btnLogin.Text = "Войти";
+                UseWaitCursor = false;
             }
         }
 
