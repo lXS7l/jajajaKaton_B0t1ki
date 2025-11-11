@@ -1,0 +1,592 @@
+import os
+import pyodbc
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения
+load_dotenv()
+
+class DatabaseManager:
+    def __init__(self):
+        self.connection_string = self._get_connection_string()
+        self.connection = None
+
+    def get_all_requests(self, status_filter: str = None, days: int = None, limit: int = None) -> List[Dict[str, Any]]:
+        """
+        Получает все заявки (для администратора)
+        """
+        try:
+            cursor = self.connection.cursor()
+
+            query = """
+                SELECT 
+                    r.id, r.request_number, r.request_text, r.status, 
+                    r.photo_url, r.video_url, r.latitude, r.longitude,
+                    r.created_at, r.updated_at,
+                    u.full_name, u.username, u.phone_number
+                FROM requests r
+                LEFT JOIN users u ON r.user_id = u.id
+                WHERE 1=1
+            """
+            params = []
+
+            if status_filter:
+                query += " AND r.status = ?"
+                params.append(status_filter)
+
+            if days:
+                query += " AND r.created_at >= DATEADD(day, -?, GETDATE())"
+                params.append(days)
+
+            query += " ORDER BY r.created_at DESC"
+
+            if limit:
+                query += " OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY"
+                params.append(limit)
+
+            cursor.execute(query, params)
+
+            requests = []
+            for row in cursor.fetchall():
+                request_data = {
+                    'id': row[0],
+                    'request_number': row[1],
+                    'request_text': row[2],
+                    'status': row[3],
+                    'photo_url': row[4],
+                    'video_url': row[5],
+                    'latitude': row[6],
+                    'longitude': row[7],
+                    'created_at': row[8],
+                    'updated_at': row[9],
+                    'user_full_name': row[10],
+                    'user_username': row[11],
+                    'user_phone_number': row[12]
+                }
+                requests.append(request_data)
+
+            return requests
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении всех заявок: {e}")
+            return []
+
+    def get_request_by_number(self, user_id: int, request_number: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает заявку по номеру для конкретного пользователя
+
+        Args:
+            user_id: ID пользователя
+            request_number: Номер заявки
+
+        Returns:
+            Данные заявки или None если не найдена
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT 
+                    id, request_number, request_text, status, 
+                    photo_url, video_url, latitude, longitude,
+                    created_at, updated_at
+                FROM requests 
+                WHERE user_id = ? AND request_number = ?
+            """, user_id, request_number)
+
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'id': row[0],
+                    'request_number': row[1],
+                    'request_text': row[2],
+                    'status': row[3],
+                    'photo_url': row[4],
+                    'video_url': row[5],
+                    'latitude': row[6],
+                    'longitude': row[7],
+                    'created_at': row[8],
+                    'updated_at': row[9]
+                }
+            return None
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении заявки по номеру: {e}")
+            return None
+
+    def _get_connection_string(self) -> str:
+        """Формирует правильную строку подключения к SQL Server"""
+        server = os.getenv('DB_SERVER', 'localhost')
+        database = os.getenv('DB_NAME', 'EmergencyBot112')
+        username = os.getenv('DB_USERNAME', '')
+        password = os.getenv('DB_PASSWORD', '')
+
+        # Строка подключения для SQL Server
+        if username and password:
+            return (
+                f"DRIVER={{SQL Server}};"
+                f"SERVER={server};"
+                f"DATABASE={database};"
+                f"UID={username};"
+                f"PWD={password};"
+                f"Trusted_Connection=no;"
+            )
+        else:
+            return (
+                f"DRIVER={{SQL Server}};"
+                f"SERVER={server};"
+                f"DATABASE={database};"
+                f"Trusted_Connection=yes;"
+            )
+
+    def connect(self):
+        """Устанавливает соединение с базой данных"""
+        try:
+            self.connection = pyodbc.connect(self.connection_string)
+        except pyodbc.Error as e:
+            print(f"Ошибка подключения к базе данных: {e}")
+            raise
+
+    def disconnect(self):
+        """Закрывает соединение с базой данных"""
+        if self.connection:
+            self.connection.close()
+
+    def _hash_code(self, code: str, salt: str) -> str:
+        """Хэширует код с использованием соли"""
+        return hashlib.sha256(f"{code}{salt}".encode()).hexdigest()
+
+    def create_admin_code(self, code: str, created_by: int = None,
+                          expires_days: int = None, max_usage: int = 0,
+                          description: str = None) -> int:
+        """
+        Создает новый код администратора
+        """
+        try:
+            salt = secrets.token_hex(16)
+            code_hash = self._hash_code(code, salt)
+
+            expires_at = None
+            if expires_days:
+                expires_at = datetime.now() + timedelta(days=expires_days)
+
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO admin_codes (code_hash, code_salt, created_by, expires_at, max_usage, description)
+                OUTPUT INSERTED.id
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, code_hash, salt, created_by, expires_at, max_usage, description)
+
+            code_id = cursor.fetchone()[0]
+            self.connection.commit()
+            print(f"Создан код администратора с ID: {code_id}")
+            return code_id
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при создании кода администратора: {e}")
+            self.connection.rollback()
+            raise
+
+    def verify_admin_code(self, input_code: str, user_id: int) -> bool:
+        """
+        Проверяет код администратора и выдает права при успехе
+        """
+        try:
+            cursor = self.connection.cursor()
+
+            # Получаем активные коды
+            cursor.execute("""
+                SELECT id, code_hash, code_salt, is_active, expires_at, usage_count, max_usage
+                FROM admin_codes 
+                WHERE is_active = 1 
+                AND (expires_at IS NULL OR expires_at > GETDATE())
+            """)
+
+            valid_code_found = False
+            code_id = None
+
+            for row in cursor.fetchall():
+                code_id, stored_hash, salt, is_active, expires_at, usage_count, max_usage = row
+
+                # Проверяем код
+                input_hash = self._hash_code(input_code, salt)
+                if input_hash == stored_hash:
+                    # Проверяем лимит использований
+                    if max_usage > 0 and usage_count >= max_usage:
+                        # Деактивируем код
+                        self.deactivate_admin_code(code_id)
+                        continue
+
+                    valid_code_found = True
+                    break
+
+            if valid_code_found:
+                # Увеличиваем счетчик использований
+                cursor.execute("""
+                    UPDATE admin_codes 
+                    SET usage_count = usage_count + 1 
+                    WHERE id = ?
+                """, code_id)
+
+                # ВАЖНО: Выдаем права администратора пользователю
+                # Используем telegram_id для поиска пользователя
+                cursor.execute("""
+                    UPDATE users 
+                    SET is_admin = 1 
+                    WHERE telegram_id = ?
+                """, user_id)
+
+                self.connection.commit()
+                print(f"Пользователю {user_id} выданы права администратора")
+                return True
+            else:
+                print("Неверный код администратора или срок действия истек")
+                return False
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при проверке кода администратора: {e}")
+            self.connection.rollback()
+            return False
+
+    def deactivate_admin_code(self, code_id: int) -> bool:
+        """Деактивирует код администратора"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE admin_codes 
+                SET is_active = 0 
+                WHERE id = ?
+            """, code_id)
+
+            self.connection.commit()
+            print(f"Код администратора {code_id} деактивирован")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при деактивации кода администратора: {e}")
+            self.connection.rollback()
+            return False
+
+    def create_user(self, telegram_id: int, username: str = None,
+                    full_name: str = None, phone_number: str = None) -> int:
+        """
+        Создает нового пользователя или возвращает существующего
+        """
+        try:
+            cursor = self.connection.cursor()
+
+            # Проверяем, существует ли пользователь
+            cursor.execute("SELECT id FROM users WHERE telegram_id = ?", telegram_id)
+
+            result = cursor.fetchone()
+            if result:
+                user_id = result[0]
+                print(f"Пользователь {user_id} уже существует")
+                return user_id
+
+            # Создаем нового пользователя
+            cursor.execute("""
+                INSERT INTO users (telegram_id, username, full_name, phone_number)
+                OUTPUT INSERTED.id
+                VALUES (?, ?, ?, ?)
+            """, telegram_id, username, full_name, phone_number)
+
+            user_id = cursor.fetchone()[0]
+            self.connection.commit()
+            print(f"Создан пользователь с ID: {user_id}")
+            return user_id
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при создании пользователя: {e}")
+            self.connection.rollback()
+            raise
+
+    def create_request(self, user_id: int, request_text: str,
+                       photo_url: str = None, video_url: str = None,
+                       latitude: float = None, longitude: float = None) -> Dict[str, Any]:
+        """
+        Создает новую заявку
+        """
+        try:
+            # Генерируем номер заявки
+            request_number = self._generate_request_number()
+
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                    INSERT INTO requests (user_id, request_text, photo_url, video_url, latitude, longitude, request_number, status)
+                    OUTPUT INSERTED.id, INSERTED.request_number, INSERTED.created_at
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'new')
+                """, user_id, request_text, photo_url, video_url, latitude, longitude, request_number)
+
+            request_id, request_number, created_at = cursor.fetchone()
+            self.connection.commit()
+
+            print(f"Создана заявка {request_number} с ID: {request_id}")
+
+            return {
+                'id': request_id,
+                'request_number': request_number,
+                'created_at': created_at,
+                'status': 'new'
+            }
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при создании заявки: {e}")
+            self.connection.rollback()
+            raise
+
+    def _generate_request_number(self) -> str:
+        """Генерирует уникальный номер заявки"""
+        current_date = datetime.now().strftime("%Y%m%d")
+
+        cursor = self.connection.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM requests 
+            WHERE request_number LIKE ? + '-%'
+        """, current_date)
+
+        count = cursor.fetchone()[0] + 1
+        return f"{current_date}-{count:04d}"
+
+    def is_user_admin(self, user_id: int) -> bool:
+        """Проверяет, является ли пользователь администратором"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT is_admin FROM users WHERE id = ?", user_id)
+
+            result = cursor.fetchone()
+            return result[0] if result else False
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при проверке прав администратора: {e}")
+            return False
+
+    def get_user_by_telegram_id(self, telegram_id: int) -> Optional[Dict[str, Any]]:
+        """Получает информацию о пользователе по Telegram ID"""
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT id, telegram_id, username, full_name, phone_number, is_admin, created_at
+                FROM users WHERE telegram_id = ?
+            """, telegram_id)
+
+            result = cursor.fetchone()
+            if result:
+                return {
+                    'id': result[0],
+                    'telegram_id': result[1],
+                    'username': result[2],
+                    'full_name': result[3],
+                    'phone_number': result[4],
+                    'is_admin': bool(result[5]),
+                    'created_at': result[6]
+                }
+            return None
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении пользователя: {e}")
+            return None
+
+    def update_request_status(self, request_id: int, status: str) -> bool:
+        """
+        Обновляет статус заявки (для администратора)
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE requests 
+                SET status = ?, updated_at = GETDATE()
+                WHERE id = ?
+            """, status, request_id)
+
+            self.connection.commit()
+            print(f"Статус заявки {request_id} обновлен на '{status}'")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при обновлении статуса заявки: {e}")
+            self.connection.rollback()
+            return False
+
+    def add_request_comment(self, request_id: int, admin_id: int, comment_text: str, is_public: bool = True) -> bool:
+        """
+        Добавляет комментарий к заявке в таблицу request_comments
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                INSERT INTO request_comments (request_id, admin_id, comment_text, is_public)
+                VALUES (?, ?, ?, ?)
+            """, request_id, admin_id, comment_text, is_public)
+
+            self.connection.commit()
+            print(f"Комментарий к заявке {request_id} добавлен")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при добавлении комментария: {e}")
+            self.connection.rollback()
+            return False
+
+    def get_request_comments(self, request_id: int) -> List[Dict[str, Any]]:
+        """
+        Получает все комментарии для заявки
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT rc.comment_text, rc.is_public, rc.created_at, u.full_name
+                FROM request_comments rc
+                LEFT JOIN users u ON rc.admin_id = u.id
+                WHERE rc.request_id = ?
+                ORDER BY rc.created_at
+            """, request_id)
+
+            comments = []
+            for row in cursor.fetchall():
+                comment_data = {
+                    'comment_text': row[0],
+                    'is_public': row[1],
+                    'created_at': row[2],
+                    'admin_name': row[3]
+                }
+                comments.append(comment_data)
+
+            return comments
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении комментариев: {e}")
+            return []
+
+    def update_request_comment(self, request_id: int, admin_comment: str) -> bool:
+        """
+        Обновляет комментарий администратора к заявке
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                UPDATE requests 
+                SET admin_comment = ?, updated_at = GETDATE()
+                WHERE id = ?
+            """, admin_comment, request_id)
+
+            self.connection.commit()
+            print(f"Комментарий к заявке {request_id} обновлен")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при обновлении комментария: {e}")
+            self.connection.rollback()
+            return False
+
+    def get_all_users(self) -> List[Dict[str, Any]]:
+        """
+        Получает всех пользователей (для администратора)
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT id, telegram_id, username, full_name, phone_number, 
+                       is_admin, created_at
+                FROM users 
+                ORDER BY created_at DESC
+            """)
+
+            users = []
+            for row in cursor.fetchall():
+                user_data = {
+                    'id': row[0],
+                    'telegram_id': row[1],
+                    'username': row[2],
+                    'full_name': row[3],
+                    'phone_number': row[4],
+                    'is_admin': bool(row[5]),
+                    'created_at': row[6]
+                }
+                users.append(user_data)
+
+            return users
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении пользователей: {e}")
+            return []
+
+    def cancel_request(self, request_id: int, user_id: int) -> bool:
+        """Отменяет заявку (меняет статус на 'cancelled')"""
+        try:
+            cursor = self.connection.cursor()
+
+            # Проверяем, что заявка принадлежит пользователю и имеет допустимый статус для отмены
+            cursor.execute("""
+                SELECT status FROM requests 
+                WHERE id = ? AND user_id = ? AND status IN ('new', 'in_progress')
+            """, request_id, user_id)
+
+            result = cursor.fetchone()
+            if not result:
+                print(f"Заявка {request_id} не найдена или нельзя отменить")
+                return False
+
+            # Обновляем статус заявки
+            cursor.execute("""
+                UPDATE requests 
+                SET status = 'cancelled', updated_at = GETDATE()
+                WHERE id = ?
+            """, request_id)
+
+            self.connection.commit()
+            print(f"Заявка {request_id} отменена пользователем {user_id}")
+            return True
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при отмене заявки: {e}")
+            self.connection.rollback()
+            return False
+
+    def get_user_requests(self, user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Получает список заявок пользователя
+
+        Args:
+            user_id: ID пользователя
+            limit: Максимальное количество заявок для возврата
+
+        Returns:
+            Список заявок пользователя
+        """
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT 
+                    id, request_number, request_text, status, 
+                    photo_url, video_url, latitude, longitude,
+                    created_at, updated_at
+                FROM requests 
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                OFFSET 0 ROWS FETCH NEXT ? ROWS ONLY
+            """, user_id, limit)
+
+            requests = []
+            for row in cursor.fetchall():
+                request_data = {
+                    'id': row[0],
+                    'request_number': row[1],
+                    'request_text': row[2],
+                    'status': row[3],
+                    'photo_url': row[4],
+                    'video_url': row[5],
+                    'latitude': row[6],
+                    'longitude': row[7],
+                    'created_at': row[8],
+                    'updated_at': row[9]
+                }
+                requests.append(request_data)
+
+            return requests
+
+        except pyodbc.Error as e:
+            print(f"Ошибка при получении заявок пользователя: {e}")
+            return []
