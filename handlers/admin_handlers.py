@@ -1,8 +1,9 @@
+from telegram import Update, ReplyKeyboardRemove, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, MessageHandler, filters
+
+from utils.helpers import format_datetime, _get_status_text
 import asyncio
 from datetime import datetime
-from utils.helpers import format_datetime, _get_status_text
-from telegram import Update, ReplyKeyboardRemove, ReplyKeyboardMarkup
-from telegram.ext import ContextTypes, ConversationHandler, MessageHandler, filters
 
 # Импорты состояний
 from handlers.states import (
@@ -11,21 +12,68 @@ from handlers.states import (
     ADMIN_REPLY_TO_REQUEST, ADMIN_SELECT_REQUEST
 )
 
-# Глобальная переменная для базы данных
-db_instance = None
+async def handle_admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает действия из админ-меню"""
+    try:
+        user = update.effective_user
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
+
+        if not db_user or not db_user['is_admin']:
+            await update.message.reply_text("У вас нет прав администратора.")
+            return
+
+        text = update.message.text
+
+        # Очищаем флаг from_start_command при переходе между разделами
+        if 'from_start_command' in context.user_data:
+            del context.user_data['from_start_command']
+
+        if text == "Статистика":
+            await admin_statistics(update, context)
+        elif text == "Все заявки":
+            await admin_view_requests(update, context, 0)
+        elif text == "Все пользователи":
+            await admin_all_users(update, context)
+        elif text == "Выгрузка отчета":
+            await export_report(update, context)
+        elif text == "Рассылка":
+            await broadcast_message(update, context)
+        elif text == "Главное меню":
+            await show_admin_menu(update, context)
+        elif text == "К списку заявок":
+            # Если пришли из команды /start, возвращаем в главное меню
+            if context.user_data.get('from_start_command'):
+                await show_admin_menu(update, context)
+            else:
+                await admin_view_requests(update, context, context.user_data.get('current_page', 0))
+        else:
+            await update.message.reply_text("Неизвестная команда.")
+
+    except Exception as e:
+        print(f"Ошибка в обработчике админ-действий: {e}")
+        await update.message.reply_text("Произошла ошибка.")
+
+async def admin_return_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Возвращает в главное меню администратора и завершает текущий ConversationHandler"""
+    # Очищаем флаг from_start_command
+    if 'from_start_command' in context.user_data:
+        del context.user_data['from_start_command']
+
+    await show_admin_menu(update, context)
+    return ConversationHandler.END
 
 async def admin_view_requests(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0) -> int:
     """Показывает заявки с пагинацией"""
     try:
         user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
 
         if not db_user or not db_user['is_admin']:
             await update.message.reply_text("У вас нет прав администратора.")
             return ConversationHandler.END
 
         # Получаем все заявки
-        all_requests = db_instance.get_all_requests()
+        all_requests = context.bot_data['db'].get_all_requests()
 
         if not all_requests:
             await update.message.reply_text(
@@ -153,7 +201,7 @@ async def admin_view_request_detail(update: Update, context: ContextTypes.DEFAUL
 
             if not selected_request:
                 # Если не нашли в кэше, ищем в БД
-                cursor = db_instance.connection.cursor()
+                cursor = context.bot_data['db'].connection.cursor()
                 cursor.execute("""
                     SELECT 
                         r.id, r.request_number, r.request_text, r.status, 
@@ -194,7 +242,7 @@ async def admin_view_request_detail(update: Update, context: ContextTypes.DEFAUL
         context.user_data['selected_request'] = selected_request
 
         # Получаем комментарии к заявке
-        comments = db_instance.get_request_comments(selected_request['id'])
+        comments = context.bot_data['db'].get_request_comments(selected_request['id'])
 
         # Форматируем даты
         created_date = format_datetime(selected_request['created_at'])
@@ -318,7 +366,7 @@ async def admin_save_status(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return await admin_change_status(update, context)
 
         # Обновляем статус в БД
-        success = db_instance.update_request_status(selected_request['id'], new_status)
+        success = context.bot_data['db'].update_request_status(selected_request['id'], new_status)
 
         if success:
             await update.message.reply_text(
@@ -422,7 +470,7 @@ async def admin_save_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Получаем информацию об администраторе
         user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
         if not db_user:
             await update.message.reply_text("Администратор не найден.")
             return await admin_view_request_detail(update, context)
@@ -431,7 +479,7 @@ async def admin_save_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         is_public = context.user_data.get('comment_is_public', True)
 
         # Сохраняем комментарий в БД
-        success = db_instance.add_request_comment(
+        success = context.bot_data['db'].add_request_comment(
             selected_request['id'],
             db_user['id'],
             reply_text,
@@ -466,7 +514,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         user = update.effective_user
 
         # Проверяем, не является ли пользователь уже администратором
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
         if db_user and db_user['is_admin']:
             await show_admin_menu(update, context)
             return ConversationHandler.END
@@ -492,13 +540,13 @@ async def verify_admin_code(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         code = update.message.text
 
         # Получаем пользователя из БД
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
         if not db_user:
             await update.message.reply_text("Пользователь не найден в базе данных.")
             return ConversationHandler.END
 
         # ПЕРЕДАЕМ TELEGRAM_ID, а не внутренний ID!
-        success = db_instance.verify_admin_code(code, user.id)
+        success = context.bot_data['db'].verify_admin_code(code, user.id)
 
         if success:
             await update.message.reply_text(
@@ -551,7 +599,7 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     except Exception as e:
         print(f"Ошибка в show_admin_menu: {e}")
-        # Фолбэк без кнопок
+        # Без кнопок
         if update.callback_query:
             await update.callback_query.message.reply_text(
                 "<b>Админ-панель</b>",
@@ -568,15 +616,15 @@ async def admin_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         # Проверяем права администратора
         user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
 
         if not db_user or not db_user['is_admin']:
             await update.message.reply_text("У вас нет прав администратора.")
             return
 
         # Получаем статистику
-        all_requests = db_instance.get_all_requests()
-        all_users = db_instance.get_all_users()
+        all_requests = context.bot_data['db'].get_all_requests()
+        all_users = context.bot_data['db'].get_all_users()
 
         # Считаем заявки по статусам
         status_count = {
@@ -615,14 +663,14 @@ async def admin_all_requests(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         # Проверяем права администратора
         user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
 
         if not db_user or not db_user['is_admin']:
             await update.message.reply_text("У вас нет прав администратора.")
             return
 
         # Получаем заявки
-        requests = db_instance.get_all_requests(limit=20)  # Ограничиваем для удобства
+        requests = context.bot_data['db'].get_all_requests(limit=20)  # Ограничиваем для удобства
 
         if not requests:
             await update.message.reply_text("Заявок пока нет.")
@@ -657,14 +705,14 @@ async def admin_all_users(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     try:
         # Проверяем права администратора
         user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
 
         if not db_user or not db_user['is_admin']:
             await update.message.reply_text("У вас нет прав администратора.")
             return
 
         # Получаем пользователей
-        users = db_instance.get_all_users()
+        users = context.bot_data['db'].get_all_users()
 
         if not users:
             await update.message.reply_text("Пользователей пока нет.")
@@ -699,7 +747,7 @@ async def export_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     try:
         # Проверяем права администратора
         user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
 
         if not db_user or not db_user['is_admin']:
             await update.message.reply_text("У вас нет прав администратора.")
@@ -745,7 +793,7 @@ async def generate_report(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return WAITING_FOR_REPORT_PERIOD
 
         # Получаем данные для отчета
-        requests = db_instance.get_all_requests(days=days)
+        requests = context.bot_data['db'].get_all_requests(days=days)
 
         # Создаем CSV отчет
         import csv
@@ -804,7 +852,7 @@ async def broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         # Проверяем права администратора
         user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
+        db_user = context.bot_data['db'].get_user_by_telegram_id(user.id)
 
         if not db_user or not db_user['is_admin']:
             await update.message.reply_text("У вас нет прав администратора.")
@@ -863,7 +911,7 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return ConversationHandler.END
 
         # Получаем всех пользователей
-        users = db_instance.get_all_users()
+        users = context.bot_data['db'].get_all_users()
         message_text = context.user_data.get('broadcast_text', '')
 
         if not message_text:
@@ -944,7 +992,7 @@ async def admin_handle_search(update: Update, context: ContextTypes.DEFAULT_TYPE
             return await admin_view_requests(update, context, 0)
 
         # Ищем заявку в БД
-        cursor = db_instance.connection.cursor()
+        cursor = context.bot_data['db'].connection.cursor()
         cursor.execute("""
             SELECT 
                 r.id, r.request_number, r.request_text, r.status, 
@@ -1015,48 +1063,9 @@ def _ensure_selected_request(context: ContextTypes.DEFAULT_TYPE) -> bool:
 
     return False
 
-async def handle_admin_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает действия из админ-меню"""
-    try:
-        user = update.effective_user
-        db_user = db_instance.get_user_by_telegram_id(user.id)
-
-        if not db_user or not db_user['is_admin']:
-            await update.message.reply_text("У вас нет прав администратора.")
-            return
-
-        text = update.message.text
-
-        if text == "Статистика":
-            await admin_statistics(update, context)
-        elif text == "Все заявки":
-            await admin_view_requests(update, context, 0)
-        elif text == "Все пользователи":
-            await admin_all_users(update, context)
-        elif text == "Выгрузка отчета":
-            await export_report(update, context)
-        elif text == "Рассылка":
-            await broadcast_message(update, context)
-        elif text == "Главное меню":
-            await update.message.reply_text(
-                "Возвращаемся в главное меню.",
-                reply_markup=ReplyKeyboardRemove()  # Убираем клавиатуру!
-            )
-        else:
-            await update.message.reply_text("Неизвестная команда.")
-
-    except Exception as e:
-        print(f"Ошибка в обработчике админ-действий: {e}")
-        await update.message.reply_text("Произошла ошибка.")
-
 # Регистрация обработчиков для администратора
 def register_admin_handlers(application):
     application.add_handler(MessageHandler(
         filters.Regex('^(Статистика|Все заявки|Все пользователи|Выгрузка отчета|Рассылка|Главное меню)$'),
         handle_admin_actions
     ))
-
-# Функция для установки экземпляра базы данных
-def set_db_instance(db):
-    global db_instance
-    db_instance = db

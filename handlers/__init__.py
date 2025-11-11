@@ -1,6 +1,5 @@
-# handlers/__init__.py
 from .user_handlers import (
-    start, my_requests, handle_inline_button,
+    start, start_with_params, my_requests, handle_inline_button,
     submit_request, receive_request_text, receive_location, skip_location,
     cancel_submit, request_details, show_selected_request, handle_navigation,
     cancel_request_selection, cancel_request_callback
