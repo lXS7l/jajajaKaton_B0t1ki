@@ -498,7 +498,8 @@ async def admin_save_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 del context.user_data['comment_is_public']
 
             # Показываем обновленные детали
-            return await admin_view_request_detail(update, context)
+            return ConversationHandler.END
+            # return await admin_view_request_detail(update, context)
         else:
             await update.message.reply_text("Ошибка при сохранении комментария.")
             return await admin_reply_to_request(update, context)

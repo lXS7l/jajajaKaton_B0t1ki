@@ -526,9 +526,9 @@ async def submit_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user = update.effective_user
 
         # Создаем клавиатуру с кнопкой для отправки геолокации
-        location_keyboard = KeyboardButton(text="Отправить геолокацию", request_location=True)
-        custom_keyboard = [[location_keyboard], ["Без геолокации"]]
-        reply_markup = ReplyKeyboardMarkup(custom_keyboard, resize_keyboard=True)
+        # location_keyboard = KeyboardButton(text="Отправить геолокацию", request_location=True)
+        # custom_keyboard = [[location_keyboard], ["Без геолокации"]]
+        # reply_markup = ReplyKeyboardMarkup(custom_keyboard, resize_keyboard=True)
 
         await update.message.reply_text(
             "<b>Подача обращения</b>\n\n"
@@ -538,7 +538,7 @@ async def submit_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             "• Когда это произошло?\n\n"
             "Вы также можете прикрепить фото/видео к сообщению.",
             parse_mode='HTML',
-            reply_markup=reply_markup
+            # reply_markup=reply_markup
         )
 
         return WAITING_FOR_TEXT
@@ -843,6 +843,20 @@ async def show_selected_request(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         user = update.effective_user
         message_text = update.message.text
+
+        # Проверяем, не является ли это командой админ-меню или другой командой
+        admin_commands = ["Статистика", "Все заявки", "Все пользователи", "Выгрузка отчета", "Рассылка", "Главное меню"]
+        if message_text in admin_commands:
+            # Сбрасываем состояние просмотра заявок
+            context.user_data.clear()
+            await update.message.reply_text(
+                "Просмотр заявок завершен.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            # Передаем управление обработчику админ-меню
+            from handlers.admin_handlers import handle_admin_actions
+            await handle_admin_actions(update, context)
+            return ConversationHandler.END
 
         # Проверяем отмену
         if message_text == "Отмена":

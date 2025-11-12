@@ -16,7 +16,7 @@ from utils.helpers import handle_other_messages
 
 load_dotenv()
 
-def main() -> None:
+def start_bot() -> None:
     # Получаем токен бота
     BOT_TOKEN = os.getenv('BOT_TOKEN')
     if not BOT_TOKEN:
@@ -69,4 +69,4 @@ def main() -> None:
             db_instance.disconnect()
 
 if __name__ == "__main__":
-    main()
+    start_bot()
